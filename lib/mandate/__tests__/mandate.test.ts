@@ -18,8 +18,8 @@ const SAMPLE_INPUT: MandateInput = {
     category_allowlist: ["TRAVEL", "SaaS"],
   },
   limits: {
-    max_per_txn: 50_000,   // ₹500 in paise
-    daily_cap: 200_000,    // ₹2,000 in paise
+    max_per_txn: 50_000, // ₹500 in paise
+    daily_cap: 200_000, // ₹2,000 in paise
     currency: "INR",
   },
   validity: {
@@ -75,10 +75,7 @@ describe("tamper detection", () => {
   const mandate = issueMandate(SAMPLE_INPUT, keys.privateKey);
 
   const cases: Array<[string, Mandate]> = [
-    [
-      "agent_id changed",
-      { ...mandate, agent_id: "tampered-agent" },
-    ],
+    ["agent_id changed", { ...mandate, agent_id: "tampered-agent" }],
     [
       "principal_id changed",
       { ...mandate, principal_id: "tampered-principal" },
@@ -167,7 +164,10 @@ describe("verifyMandateSignature with malformed input", () => {
 
   it("returns false for a garbage signature string", () => {
     expect(
-      verifyMandateSignature({ ...mandate, signature: "not-valid-base64!!!" }, publicKey),
+      verifyMandateSignature(
+        { ...mandate, signature: "not-valid-base64!!!" },
+        publicKey,
+      ),
     ).toBe(false);
   });
 
@@ -185,9 +185,7 @@ describe("verifyMandateSignature with malformed input", () => {
   });
 
   it("returns false for an invalid public key", () => {
-    expect(
-      verifyMandateSignature(mandate, "not-a-real-key"),
-    ).toBe(false);
+    expect(verifyMandateSignature(mandate, "not-a-real-key")).toBe(false);
   });
 
   it("returns false for an empty public key", () => {
@@ -291,14 +289,19 @@ describe("canonicalize", () => {
       principal_id: "p",
       scope: { merchant_allowlist: merchants, category_allowlist: [] },
       limits: { max_per_txn: 1, daily_cap: 1, currency: "INR" },
-      validity: { not_before: "2026-01-01T00:00:00Z", not_after: "2026-12-31T23:59:59Z" },
+      validity: {
+        not_before: "2026-01-01T00:00:00Z",
+        not_after: "2026-12-31T23:59:59Z",
+      },
       confirmation_threshold: 1,
       nonce: "n",
       status: "active",
     });
 
     // ["a","b"] and ["b","a"] are different arrays — canonical output must differ.
-    expect(canonicalize(make(["a", "b"]))).not.toBe(canonicalize(make(["b", "a"])));
+    expect(canonicalize(make(["a", "b"]))).not.toBe(
+      canonicalize(make(["b", "a"])),
+    );
   });
 
   it("produces compact JSON (no extra whitespace)", () => {
@@ -308,13 +311,16 @@ describe("canonicalize", () => {
       principal_id: "p",
       scope: { merchant_allowlist: [], category_allowlist: [] },
       limits: { max_per_txn: 1, daily_cap: 1, currency: "INR" },
-      validity: { not_before: "2026-01-01T00:00:00Z", not_after: "2026-12-31T23:59:59Z" },
+      validity: {
+        not_before: "2026-01-01T00:00:00Z",
+        not_after: "2026-12-31T23:59:59Z",
+      },
       confirmation_threshold: 1,
       nonce: "n",
       status: "active",
     };
     const result = canonicalize(unsigned);
     expect(result).not.toContain("  "); // no double spaces
-    expect(result).not.toMatch(/:\s/);  // no ": " spacing
+    expect(result).not.toMatch(/:\s/); // no ": " spacing
   });
 });

@@ -42,27 +42,27 @@ curl http://localhost:3000/api/health
 
 ## Available Scripts
 
-| Command | Description |
-|---|---|
-| `npm run dev` | Start development server |
-| `npm run build` | Production build |
-| `npm run start` | Start production server |
-| `npm run lint` | Run ESLint |
-| `npm run typecheck` | TypeScript type-check (no emit) |
-| `npm run format` | Auto-format with Prettier |
+| Command                | Description                      |
+| ---------------------- | -------------------------------- |
+| `npm run dev`          | Start development server         |
+| `npm run build`        | Production build                 |
+| `npm run start`        | Start production server          |
+| `npm run lint`         | Run ESLint                       |
+| `npm run typecheck`    | TypeScript type-check (no emit)  |
+| `npm run format`       | Auto-format with Prettier        |
 | `npm run format:check` | Check formatting without writing |
 
 ---
 
 ## Project Status
 
-| Phase | Status | Description |
-|---|---|---|
-| **Phase 0** | 🔄 In Progress | Project scaffold, Supabase connection, CI |
-| **Phase 1** | ⏳ Planned | Mandate schema, Ed25519 signing, DB tables |
-| **Phase 2** | ⏳ Planned | Gate verification + policy engine API |
-| **Phase 3** | ⏳ Planned | Razorpay integration, payment flow |
-| **Phase 4** | ⏳ Planned | Agent simulator, load testing, hardening |
+| Phase       | Status         | Description                                |
+| ----------- | -------------- | ------------------------------------------ |
+| **Phase 0** | 🔄 In Progress | Project scaffold, Supabase connection, CI  |
+| **Phase 1** | ⏳ Planned     | Mandate schema, Ed25519 signing, DB tables |
+| **Phase 2** | ⏳ Planned     | Gate verification + policy engine API      |
+| **Phase 3** | ⏳ Planned     | Razorpay integration, payment flow         |
+| **Phase 4** | ⏳ Planned     | Agent simulator, load testing, hardening   |
 
 ---
 

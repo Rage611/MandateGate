@@ -3,6 +3,7 @@
 **Phase 3** — Razorpay client wrapper.
 
 This module will contain:
+
 - Authenticated Razorpay API client (test mode, `rzp_test_*` keys)
 - Order creation helpers
 - Payment capture / refund utilities

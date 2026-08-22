@@ -30,8 +30,12 @@ export interface Ed25519KeyPair {
 export function generateMandateKeyPair(): Ed25519KeyPair {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   return {
-    publicKey: publicKey.export({ type: "spki", format: "der" }).toString("base64"),
-    privateKey: privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"),
+    publicKey: publicKey
+      .export({ type: "spki", format: "der" })
+      .toString("base64"),
+    privateKey: privateKey
+      .export({ type: "pkcs8", format: "der" })
+      .toString("base64"),
   };
 }
 
