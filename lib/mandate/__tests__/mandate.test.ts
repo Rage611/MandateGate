@@ -151,7 +151,7 @@ describe("tamper detection", () => {
     ],
   ];
 
-  it.each(cases)("fails when %s", (_label, tampered) => {
+  it.each(cases)("fails when %s", (_label: string, tampered: Mandate) => {
     expect(verifyMandateSignature(tampered, publicKey)).toBe(false);
   });
 });

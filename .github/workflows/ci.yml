@@ -8,7 +8,7 @@ on:
 
 jobs:
   ci:
-    name: Typecheck, Lint, Build
+    name: Build, Typecheck, Lint
     runs-on: ubuntu-latest
 
     steps:
@@ -25,13 +25,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Lint
-        run: npm run lint
-
       - name: Build
+        # next build runs its own TypeScript check AND generates .next/types/
+        # (routes.d.ts, root-params.d.ts) which next-env.d.ts statically imports.
+        # The subsequent typecheck step requires those files to exist, so build
+        # must come first.
         run: npm run build
         env:
           # Supabase is not needed at build time — the health-check route
@@ -39,3 +37,11 @@ jobs:
           NEXT_PUBLIC_SUPABASE_URL: ""
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ""
           SUPABASE_SERVICE_ROLE_KEY: ""
+
+      - name: Typecheck
+        # Runs tsc --noEmit for strict library-level type checking on top of
+        # what next build already checked. Runs after build so .next/types/ exists.
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
