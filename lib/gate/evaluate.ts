@@ -126,6 +126,22 @@ export async function evaluateGateDecision(
   const merchant_id = request.merchant_id;
   const category = request.category.toUpperCase();
 
+  // ── Step 0: Input sanity guard ────────────────────────────────────────────
+  // Must run before any DB interaction.
+  // A negative amount passed to attempt_spend executes:
+  //   SET daily_spent = daily_spent + (negative)
+  // — a budget top-up that silently grants free spending capacity.
+  // Zero has no legitimate use. Non-integer paise values are physically
+  // meaningless and may cause rounding in accounting.
+  // Throw (not reject) because this is a caller contract violation —
+  // no audit row should be written for a malformed request, and
+  // mandate_id has not been validated against the DB yet.
+  if (!Number.isInteger(amount) || amount <= 0) {
+    throw new Error(
+      `evaluateGateDecision: amount must be a positive integer (paise). Got: ${String(amount)}`,
+    );
+  }
+
   // Shared audit base — all branches add decision/reason_code on top.
   const auditBase = { mandate_id, request_id, amount, merchant_id, category };
 

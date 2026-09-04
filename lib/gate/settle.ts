@@ -142,6 +142,26 @@ export async function beginSettlement(
     );
   }
 
+  // ── Identity guard ────────────────────────────────────────────────────────
+  // Verify the request and the gate decision refer to the same mandate and
+  // request. A mismatch means the caller crossed objects — e.g. passed a
+  // decision from mandate A with a request from mandate B. That would spend
+  // mandate B's budget to settle mandate A's payment. Catch it here before
+  // any DB write or Razorpay call.
+  if (request.mandate_id !== decision.mandate_id) {
+    throw new Error(
+      `beginSettlement: request.mandate_id (${request.mandate_id}) does not ` +
+      `match decision.mandate_id (${decision.mandate_id}). ` +
+      `Caller passed mismatched objects — this is a programming error.`,
+    );
+  }
+  if (request.request_id !== decision.request_id) {
+    throw new Error(
+      `beginSettlement: request.request_id (${request.request_id}) does not ` +
+      `match decision.request_id (${decision.request_id}).`,
+    );
+  }
+
   const db = requireDb(client);
   const { mandate_id, request_id, amount } = request;
   const auditBase = {
@@ -164,7 +184,18 @@ export async function beginSettlement(
   });
 
   if (insertError) {
-    throw new Error(`payment_attempts insert failed: ${insertError.message}`);
+    // Release the reserved spend before throwing — budget must not leak.
+    // No webhook will ever arrive for an order that was never created because
+    // we failed before even calling createOrder.
+    await db.rpc("release_spend", { p_mandate_id: mandate_id, p_amount: amount });
+    await writeAudit(db, {
+      ...auditBase,
+      decision: "settled",
+      reason_code: REASON_CODES.SETTLEMENT_FAILED_SPEND_RELEASED,
+    });
+    throw new Error(
+      `payment_attempts insert failed (spend released): ${insertError.message}`,
+    );
   }
 
   // ── Create Razorpay order ─────────────────────────────────────────────────
