@@ -290,16 +290,22 @@ describe("happy path", () => {
 // 2. Rejection reasons — one test per reason code
 // ────────────────────────────────────────────────────────────────────────────
 
-describe("rejection: INVALID_SIGNATURE", () => {
-  it("rejects when mandate not found in DB", async () => {
+describe("rejection: MANDATE_NOT_FOUND", () => {
+  it("rejects when mandate_id does not exist in DB", async () => {
     state.mandateRow = null;
     const request = makeRequest(mandate.mandate_id);
     const decision = await evaluateGateDecision(request, client);
     expect(decision.outcome).toBe("rejected");
-    expect(decision.reason_code).toBe(REASON_CODES.INVALID_SIGNATURE);
+    expect(decision.reason_code).toBe(REASON_CODES.MANDATE_NOT_FOUND);
     expect(state.auditLog).toHaveLength(1);
+    expect(state.auditLog[0]).toMatchObject({
+      decision: "rejected",
+      reason_code: REASON_CODES.MANDATE_NOT_FOUND,
+    });
   });
+});
 
+describe("rejection: INVALID_SIGNATURE", () => {
   it("rejects when signature is tampered", async () => {
     // Flip a character in the signature to make it invalid.
     if (state.mandateRow) {
@@ -466,6 +472,63 @@ describe("rejection: CAP_EXCEEDED", () => {
   });
 });
 
+// ── Cap-before-confirmation ordering fix ─────────────────────────────────────
+//
+// Found via agent simulator (Phase 4): when a request exceeded BOTH the
+// confirmation_threshold AND the daily_cap, the gate returned
+// pending_confirmation instead of CAP_EXCEEDED, routing a guaranteed-to-fail
+// payment through the human approval UX. Fixed in Phase 2 patch by inserting a
+// non-atomic cap pre-check (step g) before the threshold check (step h).
+
+describe("cap-before-confirmation ordering: CAP_EXCEEDED beats NEEDS_CONFIRMATION", () => {
+  it("rejects CAP_EXCEEDED when amount exceeds BOTH threshold AND daily_cap", async () => {
+    // Mandate: threshold=200_000 (₹2k), cap=500_000 (₹5k).
+    // Scenario: ₹4,900 already spent, request is ₹200_001 (above threshold).
+    // Total would be ₹6,900 > ₹5,000 cap — impossible to ever approve.
+    // Before the fix: gate returned pending_confirmation (wrong — wastes human
+    // approval on a request confirmPendingPayment() would then reject at cap).
+    // After the fix: gate returns CAP_EXCEEDED immediately (correct).
+    state.dailySpent = 490_000;
+    if (state.mandateRow) state.mandateRow.daily_spent = 490_000;
+
+    const decision = await evaluateGateDecision(
+      makeRequest(mandate.mandate_id, { amount: 200_001 }),
+      client,
+    );
+
+    expect(decision.outcome).toBe("rejected");
+    expect(decision.reason_code).toBe(REASON_CODES.CAP_EXCEEDED);
+    expect(state.auditLog).toHaveLength(1);
+    expect(state.auditLog[0]).toMatchObject({
+      decision: "rejected",
+      reason_code: REASON_CODES.CAP_EXCEEDED,
+    });
+
+    // No spend committed; daily_spent unchanged.
+    expect(state.dailySpent).toBe(490_000);
+  });
+
+  it("still returns pending_confirmation when amount exceeds threshold BUT cap has room", async () => {
+    // Mandate: threshold=200_000 (₹2k), cap=500_000 (₹5k).
+    // Scenario: ₹0 spent, request ₹200_001 (above threshold, well under cap).
+    // This is the legitimate confirmation path — fix must not over-correct.
+    state.dailySpent = 0;
+    if (state.mandateRow) state.mandateRow.daily_spent = 0;
+
+    const decision = await evaluateGateDecision(
+      makeRequest(mandate.mandate_id, { amount: 200_001 }),
+      client,
+    );
+
+    expect(decision.outcome).toBe("pending_confirmation");
+    expect(decision.reason_code).toBe(REASON_CODES.NEEDS_CONFIRMATION);
+
+    // No spend committed while waiting for confirmation.
+    expect(state.dailySpent).toBe(0);
+    expect(state.consumedRequests.size).toBe(0);
+  });
+});
+
 describe("pending_confirmation: NEEDS_CONFIRMATION", () => {
   it("returns pending_confirmation when amount exceeds threshold", async () => {
     // Mandate has confirmation_threshold = 200_000 (₹2,000).
@@ -528,12 +591,12 @@ describe("audit_log completeness", () => {
       expectedDecision: "approved",
     },
     {
-      label: "INVALID_SIGNATURE (not found)",
+      label: "MANDATE_NOT_FOUND",
       setup: (s) => {
         s.mandateRow = null;
       },
       expectedDecision: "rejected",
-      expectedReason: REASON_CODES.INVALID_SIGNATURE,
+      expectedReason: REASON_CODES.MANDATE_NOT_FOUND,
     },
     {
       label: "MANDATE_REVOKED",
@@ -563,10 +626,12 @@ describe("audit_log completeness", () => {
     },
     {
       label: "NEEDS_CONFIRMATION",
-      setup: () => {
-        /* covered by request override */
+      setup: (s) => {
+        // amount=300_000 is over confirmation_threshold (200_000) but under
+        // daily_cap (500_000), so it correctly reaches the threshold check.
+        if (s.mandateRow) s.mandateRow.daily_spent = 0;
       },
-      request: (id) => makeRequest(id, { amount: 999_999 }),
+      request: (id) => makeRequest(id, { amount: 300_000 }),
       expectedDecision: "pending_confirmation",
       expectedReason: REASON_CODES.NEEDS_CONFIRMATION,
     },
@@ -743,14 +808,28 @@ describe("all 8 reason codes are reachable", () => {
   it("covers all 8 codes", async () => {
     const reached = new Set<string>();
 
-    // INVALID_SIGNATURE
+    // MANDATE_NOT_FOUND (mandate row absent)
     state.mandateRow = null;
-    const r1 = await evaluateGateDecision(
+    const r1a = await evaluateGateDecision(
       makeRequest(mandate.mandate_id),
       client,
     );
-    reached.add(r1.reason_code!);
+    reached.add(r1a.reason_code!);
     state.mandateRow = mandateToRow(mandate);
+    state.auditLog = [];
+
+    // INVALID_SIGNATURE (mandate exists but signature tampered)
+    const savedSig = state.mandateRow.signature;
+    state.mandateRow.signature = state.mandateRow.signature
+      .split("")
+      .map((c, i) => (i === 0 ? (c === "A" ? "B" : "A") : c))
+      .join("");
+    const r1b = await evaluateGateDecision(
+      makeRequest(mandate.mandate_id),
+      client,
+    );
+    reached.add(r1b.reason_code!);
+    state.mandateRow.signature = savedSig;
     state.auditLog = [];
 
     // MANDATE_REVOKED
@@ -820,21 +899,25 @@ describe("all 8 reason codes are reachable", () => {
 
     // CAP_EXCEEDED
     state.dailySpent = 499_999;
+    if (state.mandateRow) state.mandateRow.daily_spent = 499_999;
     const r7 = await evaluateGateDecision(
       makeRequest(mandate.mandate_id, { amount: 10_000 }),
       client,
     );
     reached.add(r7.reason_code!);
     state.dailySpent = 0;
+    if (state.mandateRow) state.mandateRow.daily_spent = 0;
     state.auditLog = [];
 
-    // NEEDS_CONFIRMATION
+    // NEEDS_CONFIRMATION — amount over threshold but under cap
+    if (state.mandateRow) state.mandateRow.daily_spent = 0;
     const r8 = await evaluateGateDecision(
-      makeRequest(mandate.mandate_id, { amount: 999_999 }),
+      makeRequest(mandate.mandate_id, { amount: 300_000 }),
       client,
     );
     reached.add(r8.reason_code!);
 
+    expect(reached).toContain(REASON_CODES.MANDATE_NOT_FOUND);
     expect(reached).toContain(REASON_CODES.INVALID_SIGNATURE);
     expect(reached).toContain(REASON_CODES.MANDATE_REVOKED);
     expect(reached).toContain(REASON_CODES.MANDATE_NOT_YET_VALID);
@@ -843,6 +926,6 @@ describe("all 8 reason codes are reachable", () => {
     expect(reached).toContain(REASON_CODES.OUT_OF_SCOPE);
     expect(reached).toContain(REASON_CODES.CAP_EXCEEDED);
     expect(reached).toContain(REASON_CODES.NEEDS_CONFIRMATION);
-    expect(reached.size).toBe(8);
+    expect(reached.size).toBe(9);
   });
 });

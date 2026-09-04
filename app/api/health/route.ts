@@ -16,14 +16,13 @@ export async function GET() {
     // If rpc isn't available, fall back to a raw SQL query via the REST API.
     // We use `.from()` on a known Postgres built-in view as a simple ping.
     if (error) {
-      // Fallback: just try to reach Supabase at all.
+      // Fallback: query the mandates table directly
       const { error: pingError } = await supabase
-        .from("_health_check_nonexistent_table_")
-        .select("*")
+        .from("mandates")
+        .select("mandate_id")
         .limit(1);
 
-      // PGRST116 = table not found — this means the DB connection itself works.
-      if (pingError && pingError.code !== "PGRST116") {
+      if (pingError && pingError.code !== "PGRST116" && pingError.code !== "PGRST205") {
         console.error("[health] Supabase ping error:", pingError);
         return NextResponse.json(
           { ok: false, db: "error", detail: pingError.message },

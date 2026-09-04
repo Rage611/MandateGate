@@ -37,15 +37,15 @@ function rowToMandate(row: MandateRow): Mandate {
       category_allowlist: row.scope_category_allowlist,
     },
     limits: {
-      max_per_txn: row.limits_max_per_txn,
-      daily_cap: row.limits_daily_cap,
+      max_per_txn: Number(row.limits_max_per_txn),
+      daily_cap: Number(row.limits_daily_cap),
       currency: row.limits_currency,
     },
     validity: {
-      not_before: row.validity_not_before,
-      not_after: row.validity_not_after,
+      not_before: new Date(row.validity_not_before).toISOString(),
+      not_after: new Date(row.validity_not_after).toISOString(),
     },
-    confirmation_threshold: row.confirmation_threshold,
+    confirmation_threshold: Number(row.confirmation_threshold),
     nonce: row.nonce,
     // Always use "active" for signature verification — that is what was signed.
     // The actual current status is read from row.status and checked in step c.
@@ -145,8 +145,11 @@ export async function evaluateGateDecision(
     .single<MandateRow>();
 
   if (fetchError || !row) {
-    // Mandate not found — treat as invalid signature (no mandate to verify against).
-    return reject(REASON_CODES.INVALID_SIGNATURE);
+    // No mandate row found for this mandate_id.
+    // MANDATE_NOT_FOUND is distinct from INVALID_SIGNATURE: the latter means
+    // the mandate exists but its signature was tampered. Both are auditable
+    // separately — different debugging paths, different alert thresholds.
+    return reject(REASON_CODES.MANDATE_NOT_FOUND);
   }
 
   // ── Step b: Verify signature ─────────────────────────────────────────────
@@ -210,10 +213,51 @@ export async function evaluateGateDecision(
     return reject(REASON_CODES.OUT_OF_SCOPE);
   }
 
-  // ── Step g: Confirmation threshold check ─────────────────────────────────
+  // ── Step g: Hard cap pre-check (non-atomic, UX optimisation) ────────────
+  //
+  // WHY this is not the authoritative cap check:
+  //   The authoritative, race-safe cap enforcement is step h (attempt_spend),
+  //   which performs the check and the increment as a single atomic Postgres
+  //   UPDATE ... WHERE ... RETURNING. That is the security boundary.
+  //
+  // WHY this pre-check exists:
+  //   The confirmation_threshold check (step h below) defers a payment to a
+  //   human for approval without spending from the cap. If we allowed such a
+  //   request to proceed to the threshold check when it already exceeds
+  //   daily_cap — including the amount already spent — the human confirmation
+  //   would always ultimately fail at confirmPendingPayment() (step h there
+  //   calls attempt_spend and the cap check fails). We would be routing the
+  //   human through a confirmation UX for a payment that is mathematically
+  //   impossible to approve. That is confusing and wasteful.
+  //
+  // The fix: reject CAP_EXCEEDED immediately when daily_spent + amount exceeds
+  // the cap, before we ever evaluate the confirmation threshold. Hard
+  // constraints (hard cap) must be checked before soft ones (threshold).
+  //
+  // The comparison operator is intentionally identical to the attempt_spend SQL:
+  //   daily_spent + amount <= limits_daily_cap  → allow
+  //   daily_spent + amount >  limits_daily_cap  → CAP_EXCEEDED
+  // If this drifts from the SQL semantics, the pre-check and the atomic check
+  // will disagree and introduce a gap.
+  //
+  // A race condition between this read and step h is benign: if another request
+  // commits a spend between this check and step h, the worst outcome is that
+  // this request reaches the confirmation step and then attempt_spend rejects it
+  // at step h — still correct, just slightly later. The reverse is also safe:
+  // this check uses a slightly stale daily_spent but step h's atomicity means
+  // we can never actually double-spend.
+  const dailySpentSoFar = Number(row.daily_spent);
+  if (dailySpentSoFar + amount > mandate.limits.daily_cap) {
+    return reject(REASON_CODES.CAP_EXCEEDED);
+  }
+
+  // ── Step h: Confirmation threshold check ─────────────────────────────────
   // If the amount exceeds the threshold, the mandate requires human confirmation
   // before this payment can proceed. We do NOT write to consumed_requests or
   // call attempt_spend — the hold is recorded in audit_log only.
+  // Reached here only if the hard cap pre-check (step g) already confirmed that
+  // daily_spent + amount <= daily_cap, so a human confirming this payment will
+  // not immediately fail the cap check.
   if (amount > mandate.confirmation_threshold) {
     await writeAudit(safeDb, {
       ...auditBase,
@@ -228,13 +272,15 @@ export async function evaluateGateDecision(
     };
   }
 
-  // ── Step h: Atomic cap check + spend ─────────────────────────────────────
+  // ── Step i: Atomic cap check + spend ─────────────────────────────────────
   // attempt_spend is a Postgres function that atomically checks
   //   daily_spent + amount <= limits_daily_cap
   // AND performs the increment in a single UPDATE ... WHERE ... RETURNING.
   // If the cap would be exceeded the WHERE clause filters the row out and the
   // function returns 0 rows. This prevents the race condition where two concurrent
   // calls both pass the check before either writes.
+  // Note: step g already confirmed this is within cap for the common case, but
+  // this atomic check is still the security boundary for concurrent requests.
   const { data: spendRows, error: spendError } = await safeDb.rpc(
     "attempt_spend",
     {
@@ -254,7 +300,7 @@ export async function evaluateGateDecision(
     return reject(REASON_CODES.CAP_EXCEEDED);
   }
 
-  // ── Step i: Record approval ───────────────────────────────────────────────
+  // ── Step j: Record approval ───────────────────────────────────────────────
   const { error: idempotencyError } = await safeDb
     .from("consumed_requests")
     .insert({ mandate_id, request_id });

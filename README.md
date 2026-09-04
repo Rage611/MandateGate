@@ -19,15 +19,29 @@ git clone <your-repo-url>
 # 2. Install dependencies
 npm install
 
-# 3. Copy and fill in environment variables
+# 3. Environment Variables
 cp .env.local.example .env.local
-# Edit .env.local with your real Supabase and Razorpay keys
+# Edit .env.local with:
+# - Supabase keys (URL, Anon, Service Role)
+# - Razorpay keys (Key ID, Secret, Webhook Secret)
+# - OpenAI API Key (for NLP mandate authoring)
 
-# 4. Run development server
+# 4. Database Setup (Supabase)
+# Push migrations to your Supabase project in order:
+supabase link --project-ref your-project-ref
+supabase db push
+
+# 5. Generate Mandate Keys
+# Generate the Ed25519 signing keypair and add them to .env.local
+npm run generate-keys
+
+# 6. Run development server
 npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) in your browser.
+
+> **Note on Webhooks:** For Razorpay test mode settlement to work, you must forward webhook events to your local dev server via ngrok or the Razorpay CLI, mapped to `http://localhost:3000/api/razorpay/webhook`.
 
 ### Health check
 
@@ -49,8 +63,8 @@ curl http://localhost:3000/api/health
 | `npm run start`        | Start production server          |
 | `npm run lint`         | Run ESLint                       |
 | `npm run typecheck`    | TypeScript type-check (no emit)  |
-| `npm run format`       | Auto-format with Prettier        |
-| `npm run format:check` | Check formatting without writing |
+| `npm run test`         | Run Vitest test suite            |
+| `npm run simulate`     | Run the Agent Simulator E2E test |
 
 ---
 
@@ -58,11 +72,14 @@ curl http://localhost:3000/api/health
 
 | Phase       | Status         | Description                                |
 | ----------- | -------------- | ------------------------------------------ |
-| **Phase 0** | 🔄 In Progress | Project scaffold, Supabase connection, CI  |
-| **Phase 1** | ⏳ Planned     | Mandate schema, Ed25519 signing, DB tables |
-| **Phase 2** | ⏳ Planned     | Gate verification + policy engine API      |
-| **Phase 3** | ⏳ Planned     | Razorpay integration, payment flow         |
-| **Phase 4** | ⏳ Planned     | Agent simulator, load testing, hardening   |
+| **Phase 0** | ✅ Complete    | Project scaffold, Supabase connection, CI  |
+| **Phase 1** | ✅ Complete    | Mandate schema, Ed25519 signing, DB tables |
+| **Phase 2** | ✅ Complete    | Gate verification + policy engine API      |
+| **Phase 3** | ✅ Complete    | Razorpay integration, payment flow         |
+| **Phase 4** | ✅ Complete    | Agent simulator, load testing, hardening   |
+| **Phase 5** | ✅ Complete    | Ops dashboard (Read-only + Confirm action) |
+| **Phase 6** | ✅ Complete    | UI/UX visual polish                        |
+| **Phase 7** | ✅ Complete    | Natural language mandate authoring (LLM)   |
 
 ---
 
