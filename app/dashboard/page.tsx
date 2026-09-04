@@ -80,6 +80,21 @@ export default function DashboardPage() {
   const [editingProposal, setEditingProposal] = useState<boolean>(false);
   const [issuing, setIssuing] = useState<boolean>(false);
 
+  // --- Agent Playground state ---
+  const [playgroundMandateId, setPlaygroundMandateId] = useState<string>("");
+  const [playgroundMerchant, setPlaygroundMerchant] = useState<string>("");
+  const [playgroundCategory, setPlaygroundCategory] = useState<string>("");
+  const [playgroundAmount, setPlaygroundAmount] = useState<string>("");
+  const [playgroundFiring, setPlaygroundFiring] = useState<boolean>(false);
+  const [playgroundResult, setPlaygroundResult] = useState<{
+    decision: "approved" | "rejected" | "pending_confirmation";
+    reason_code: string | null;
+    explanation: string;
+    request_id: string;
+    amount_inr: number;
+    razorpay_order_id: string | null;
+  } | null>(null);
+
   const fetchData = useCallback(async () => {
     try {
       const res = await fetch("/api/dashboard");
@@ -242,7 +257,89 @@ export default function DashboardPage() {
     }
   };
 
+  const handlePlaygroundFire = async (overrides?: {
+    merchant_id?: string;
+    category?: string;
+    amount?: number;
+  }) => {
+    const mandateId = playgroundMandateId;
+    if (!mandateId) {
+      setPlaygroundResult(null);
+      return;
+    }
+    const merchant = overrides?.merchant_id ?? playgroundMerchant;
+    const category = overrides?.category ?? playgroundCategory;
+    const amountPaise =
+      overrides?.amount !== undefined
+        ? overrides.amount
+        : Math.round(parseFloat(playgroundAmount) * 100);
+
+    if (!merchant || !category || isNaN(amountPaise) || amountPaise <= 0) {
+      return;
+    }
+
+    setPlaygroundFiring(true);
+    setPlaygroundResult(null);
+
+    try {
+      const res = await fetch("/api/gate/pay", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mandate_id: mandateId,
+          amount: amountPaise,
+          merchant_id: merchant,
+          category: category.toUpperCase(),
+          // No request_id — server auto-generates a UUID so every click is fresh
+        }),
+      });
+      const data = await res.json() as {
+        decision?: "approved" | "rejected" | "pending_confirmation";
+        reason_code?: string | null;
+        explanation?: string;
+        request_id?: string;
+        amount_inr?: number;
+        razorpay_order_id?: string | null;
+        error?: string;
+      };
+
+      if (!res.ok || !data.decision) {
+        setPlaygroundResult({
+          decision: "rejected",
+          reason_code: "SERVER_ERROR",
+          explanation: data.error ?? "Unexpected server error.",
+          request_id: "",
+          amount_inr: amountPaise / 100,
+          razorpay_order_id: null,
+        });
+      } else {
+        setPlaygroundResult({
+          decision: data.decision,
+          reason_code: data.reason_code ?? null,
+          explanation: data.explanation ?? "",
+          request_id: data.request_id ?? "",
+          amount_inr: data.amount_inr ?? amountPaise / 100,
+          razorpay_order_id: data.razorpay_order_id ?? null,
+        });
+        // Refresh dashboard so the ledger & utilization bars update live
+        await fetchData();
+      }
+    } catch (err) {
+      setPlaygroundResult({
+        decision: "rejected",
+        reason_code: "NETWORK_ERROR",
+        explanation: err instanceof Error ? err.message : "Network error.",
+        request_id: "",
+        amount_inr: amountPaise / 100,
+        razorpay_order_id: null,
+      });
+    } finally {
+      setPlaygroundFiring(false);
+    }
+  };
+
   const formatPaise = (paise: number) => {
+
     return new Intl.NumberFormat("en-IN", {
       style: "currency",
       currency: "INR",
@@ -413,6 +510,286 @@ export default function DashboardPage() {
           </div>
         </div>
       </div>
+
+      {/* AGENT PLAYGROUND */}
+      <section className="mb-14">
+        <h2 className="text-2xl font-display text-white tracking-wide mb-2 flex items-center gap-4">
+          Agent Playground
+          <span className="text-xs font-sans font-medium px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-900 uppercase tracking-widest">
+            Live Gate · Real Pipeline
+          </span>
+        </h2>
+        <p className="text-xs text-zinc-500 font-mono mb-6">
+          Every request below runs through the full 10-step policy engine — signature verify, scope, atomic cap, settlement. Nothing is mocked.
+        </p>
+
+        <div className="bg-[var(--color-panel)] border border-[var(--color-elevated)] rounded shadow-md overflow-hidden">
+          {/* Mandate selector */}
+          <div className="p-6 border-b border-[var(--color-elevated)]">
+            <label className="block text-[10px] font-mono uppercase tracking-widest text-zinc-500 mb-2">
+              Select Mandate to Test Against
+            </label>
+            <select
+              value={playgroundMandateId}
+              onChange={(e) => {
+                setPlaygroundMandateId(e.target.value);
+                setPlaygroundResult(null);
+              }}
+              className="w-full bg-[var(--color-page)] border border-[var(--color-elevated)] text-zinc-200 font-mono text-xs rounded px-3 py-2.5 focus:outline-none focus:border-zinc-600"
+            >
+              <option value="">— choose an active mandate —</option>
+              {mandates
+                .filter((m) => m.status === "active")
+                .map((m) => {
+                  const remaining = Number(m.limits_daily_cap) - Number(m.daily_spent);
+                  const merchants =
+                    m.scope_merchant_allowlist.length > 0
+                      ? m.scope_merchant_allowlist.slice(0, 2).join(", ")
+                      : "ANY";
+                  const cats =
+                    m.scope_category_allowlist.length > 0
+                      ? m.scope_category_allowlist.slice(0, 2).join(", ")
+                      : "ANY";
+                  return (
+                    <option key={m.mandate_id} value={m.mandate_id}>
+                      {m.mandate_id.slice(0, 8)}… · ₹{(remaining / 100).toFixed(0)} left today · {merchants} · [{cats}]
+                    </option>
+                  );
+                })}
+            </select>
+
+            {/* Show selected mandate's live limits */}
+            {playgroundMandateId && (() => {
+              const m = mandates.find((x) => x.mandate_id === playgroundMandateId);
+              if (!m) return null;
+              const spent = Number(m.daily_spent) / 100;
+              const cap = Number(m.limits_daily_cap) / 100;
+              const maxTxn = Number(m.limits_max_per_txn) / 100;
+              const threshold = Number(m.confirmation_threshold) / 100;
+              const pct = cap > 0 ? Math.min((spent / cap) * 100, 100) : 0;
+              return (
+                <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
+                  <div className="bg-[var(--color-page)] border border-[var(--color-elevated)] rounded px-3 py-2">
+                    <div className="text-zinc-500 text-[9px] uppercase tracking-widest mb-1">Daily Cap</div>
+                    <div className="text-zinc-100">₹{cap.toFixed(0)}</div>
+                  </div>
+                  <div className="bg-[var(--color-page)] border border-[var(--color-elevated)] rounded px-3 py-2">
+                    <div className="text-zinc-500 text-[9px] uppercase tracking-widest mb-1">Spent Today</div>
+                    <div className="text-zinc-100">₹{spent.toFixed(0)} <span className="text-zinc-600">({pct.toFixed(0)}%)</span></div>
+                  </div>
+                  <div className="bg-[var(--color-page)] border border-[var(--color-elevated)] rounded px-3 py-2">
+                    <div className="text-zinc-500 text-[9px] uppercase tracking-widest mb-1">Max / Txn</div>
+                    <div className="text-zinc-100">₹{maxTxn.toFixed(0)}</div>
+                  </div>
+                  <div className="bg-[var(--color-page)] border border-[var(--color-gold-muted)] rounded px-3 py-2">
+                    <div className="text-[var(--color-gold)] text-[9px] uppercase tracking-widest mb-1">Confirm Threshold</div>
+                    <div className="text-[var(--color-gold)]">₹{threshold.toFixed(0)}</div>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* Quick Scenarios */}
+          {playgroundMandateId && (() => {
+            const m = mandates.find((x) => x.mandate_id === playgroundMandateId);
+            const allowedMerchant =
+              m && m.scope_merchant_allowlist.length > 0
+                ? m.scope_merchant_allowlist[0]
+                : "merchant_grocery";
+            const allowedCat =
+              m && m.scope_category_allowlist.length > 0
+                ? m.scope_category_allowlist[0]
+                : "GROCERY";
+            const threshold = m ? Number(m.confirmation_threshold) : 100000;
+            const cap = m ? Number(m.limits_daily_cap) : 150000;
+            const spent = m ? Number(m.daily_spent) : 0;
+            const remaining = cap - spent;
+
+            const scenarios = [
+              {
+                label: "✅ Happy Path",
+                desc: "Small in-scope purchase",
+                color: "border-emerald-900 hover:border-emerald-700 text-emerald-400",
+                params: { merchant_id: allowedMerchant, category: allowedCat, amount: Math.min(30000, Math.max(100, Math.floor(threshold * 0.3))) },
+              },
+              {
+                label: "🔴 Over Daily Cap",
+                desc: "Exceeds remaining budget",
+                color: "border-rose-900 hover:border-rose-700 text-rose-400",
+                params: { merchant_id: allowedMerchant, category: allowedCat, amount: remaining + 10000 },
+              },
+              {
+                label: "🔴 Wrong Category",
+                desc: "Out-of-scope purchase",
+                color: "border-rose-900 hover:border-rose-700 text-rose-400",
+                params: { merchant_id: "store-electronics", category: "ELECTRONICS", amount: 10000 },
+              },
+              {
+                label: "🟡 Needs Approval",
+                desc: "Exceeds confirmation threshold",
+                color: "border-amber-900 hover:border-amber-700 text-amber-400",
+                params: { merchant_id: allowedMerchant, category: allowedCat, amount: Math.min(threshold + 10000, remaining > threshold + 10000 ? threshold + 10000 : threshold - 1000) },
+              },
+            ];
+
+            return (
+              <div className="p-6 border-b border-[var(--color-elevated)]">
+                <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-500 mb-3">
+                  Quick Scenarios — 1 Click
+                </div>
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                  {scenarios.map((s) => (
+                    <button
+                      key={s.label}
+                      disabled={playgroundFiring}
+                      onClick={() => {
+                        const merchant = s.params.merchant_id;
+                        const cat = s.params.category;
+                        const amt = s.params.amount;
+                        // pre-fill the custom inputs so the user sees what was sent
+                        setPlaygroundMerchant(merchant);
+                        setPlaygroundCategory(cat);
+                        setPlaygroundAmount((amt / 100).toFixed(2));
+                        void handlePlaygroundFire({ merchant_id: merchant, category: cat, amount: amt });
+                      }}
+                      className={`flex flex-col gap-1 px-4 py-3 rounded border bg-[var(--color-page)] text-left transition-all disabled:opacity-40 disabled:cursor-not-allowed ${s.color}`}
+                    >
+                      <span className="text-xs font-bold font-mono">{s.label}</span>
+                      <span className="text-[10px] text-zinc-500">{s.desc}</span>
+                      <span className="text-[9px] font-mono text-zinc-600 mt-1">
+                        ₹{(s.params.amount / 100).toFixed(0)} · {s.params.category}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Custom input */}
+          {playgroundMandateId && (
+            <div className="p-6 border-b border-[var(--color-elevated)]">
+              <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-500 mb-3">
+                Custom Request
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                <div>
+                  <label className="block text-[9px] font-mono uppercase tracking-widest text-zinc-600 mb-1">Merchant ID</label>
+                  <input
+                    type="text"
+                    value={playgroundMerchant}
+                    onChange={(e) => setPlaygroundMerchant(e.target.value)}
+                    placeholder="merchant_grocery"
+                    className="w-full bg-[var(--color-page)] border border-[var(--color-elevated)] text-zinc-200 font-mono text-xs rounded px-3 py-2 focus:outline-none focus:border-zinc-600 placeholder-zinc-700"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[9px] font-mono uppercase tracking-widest text-zinc-600 mb-1">Category</label>
+                  <input
+                    type="text"
+                    value={playgroundCategory}
+                    onChange={(e) => setPlaygroundCategory(e.target.value)}
+                    placeholder="GROCERY"
+                    className="w-full bg-[var(--color-page)] border border-[var(--color-elevated)] text-zinc-200 font-mono text-xs rounded px-3 py-2 focus:outline-none focus:border-zinc-600 placeholder-zinc-700"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[9px] font-mono uppercase tracking-widest text-zinc-600 mb-1">Amount (₹)</label>
+                  <input
+                    type="number"
+                    value={playgroundAmount}
+                    onChange={(e) => setPlaygroundAmount(e.target.value)}
+                    placeholder="300.00"
+                    min="1"
+                    step="1"
+                    className="w-full bg-[var(--color-page)] border border-[var(--color-elevated)] text-zinc-200 font-mono text-xs rounded px-3 py-2 focus:outline-none focus:border-zinc-600 placeholder-zinc-700"
+                  />
+                </div>
+                <div className="flex items-end">
+                  <button
+                    disabled={playgroundFiring || !playgroundMerchant || !playgroundCategory || !playgroundAmount}
+                    onClick={() => void handlePlaygroundFire()}
+                    className="w-full px-4 py-2 rounded text-xs font-bold font-mono uppercase tracking-widest transition-all bg-zinc-100 hover:bg-white text-black disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  >
+                    {playgroundFiring ? (
+                      <>
+                        <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+                        </svg>
+                        Firing…
+                      </>
+                    ) : (
+                      "Fire Request →"
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Result card */}
+          {playgroundResult && (() => {
+            const isApproved = playgroundResult.decision === "approved";
+            const isPending = playgroundResult.decision === "pending_confirmation";
+            const borderColor = isApproved
+              ? "border-emerald-800"
+              : isPending
+              ? "border-amber-800"
+              : "border-rose-900";
+            const bgColor = isApproved
+              ? "bg-emerald-950/40"
+              : isPending
+              ? "bg-amber-950/40"
+              : "bg-rose-950/40";
+            const labelColor = isApproved
+              ? "text-emerald-400"
+              : isPending
+              ? "text-amber-400"
+              : "text-rose-400";
+            const decisionLabel = isApproved
+              ? "APPROVED"
+              : isPending
+              ? "PENDING CONFIRMATION"
+              : "REJECTED";
+
+            return (
+              <div className={`p-6 border-t ${borderColor} ${bgColor} animate-slide-down-fade`}>
+                <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+                  <div className="flex-1">
+                    <div className={`text-xs font-mono font-bold uppercase tracking-widest mb-1 ${labelColor}`}>
+                      ⬤ {decisionLabel}
+                      {playgroundResult.reason_code && (
+                        <span className="ml-3 text-zinc-500 font-normal">· {playgroundResult.reason_code}</span>
+                      )}
+                    </div>
+                    <p className="text-sm text-zinc-300 font-serif italic mb-3">{playgroundResult.explanation}</p>
+                    <div className="flex flex-wrap gap-4 text-[10px] font-mono text-zinc-500">
+                      <span>Amount: <span className="text-zinc-300">₹{playgroundResult.amount_inr.toFixed(2)}</span></span>
+                      <span>Req ID: <span className="text-zinc-400 break-all">{playgroundResult.request_id.slice(0, 32)}…</span></span>
+                      {playgroundResult.razorpay_order_id && (
+                        <span>Razorpay Order: <span className="text-emerald-400">{playgroundResult.razorpay_order_id}</span></span>
+                      )}
+                    </div>
+                  </div>
+                  {isPending && (
+                    <div className="text-[10px] font-mono text-amber-500 bg-amber-950/60 border border-amber-900 rounded px-3 py-2 shrink-0">
+                      ↑ Check Pending Confirmations
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
+          {!playgroundMandateId && (
+            <div className="p-10 text-center text-zinc-600 text-sm font-serif italic">
+              Select a mandate above to start testing the live policy engine.
+            </div>
+          )}
+        </div>
+      </section>
 
       {/* SECTION C: PENDING CONFIRMATIONS (ACTIONABLE HUMAN-IN-THE-LOOP) */}
       <section className="mb-14">
