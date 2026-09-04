@@ -2,6 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "crypto";
 import { evaluateGateDecision } from "@/lib/gate/evaluate";
 import { beginSettlement } from "@/lib/gate/settle";
+import { sanitizeError } from "@/lib/api/sanitize-error";
 
 export const dynamic = "force-dynamic";
 
@@ -113,9 +114,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     decision = await evaluateGateDecision({ mandate_id, request_id, amount, merchant_id, category });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error("[gate/pay] evaluateGateDecision threw:", message);
-    return NextResponse.json({ error: "Internal gate error. Check server logs.", detail: message }, { status: 500 });
+    return NextResponse.json(
+      { error: sanitizeError(err, "gate/pay evaluateGateDecision") },
+      { status: 500 },
+    );
   }
 
   let razorpayOrderId: string | null = null;
@@ -131,8 +133,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // Settlement failed after gate approval. The gate has already reserved budget
       // (beginSettlement releases it internally via release_spend on order failure),
       // so we must NOT silently return "approved" — the agent has no valid order to pay.
-      const message = err instanceof Error ? err.message : String(err);
-      console.error("[gate/pay] beginSettlement threw:", message);
+      sanitizeError(err, "gate/pay beginSettlement"); // logs full error server-side
       return NextResponse.json(
         {
           decision: "approved",

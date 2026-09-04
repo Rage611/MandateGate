@@ -3,6 +3,7 @@ import { issueMandate } from "@/lib/mandate/sign";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import type { MandateInput } from "@/lib/mandate/types";
 import type { MandateRow } from "@/lib/gate/types";
+import { sanitizeError } from "@/lib/api/sanitize-error";
 
 export const dynamic = "force-dynamic";
 
@@ -195,12 +196,7 @@ export async function POST(req: NextRequest) {
     });
   } catch (err) {
     return NextResponse.json(
-      {
-        error:
-          err instanceof Error
-            ? err.message
-            : "An unexpected error occurred during mandate issuance",
-      },
+      { error: sanitizeError(err, "mandates/issue") },
       { status: 500 },
     );
   }

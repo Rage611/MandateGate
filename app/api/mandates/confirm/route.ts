@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { confirmPendingPayment, beginSettlement } from "@/lib/gate/settle";
 import type { PaymentRequest } from "@/lib/gate/types";
+import { sanitizeError } from "@/lib/api/sanitize-error";
 
 export const dynamic = "force-dynamic";
 
@@ -75,10 +76,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json(
           {
             decision,
-            error:
-              settleErr instanceof Error
-                ? settleErr.message
-                : "Settlement failed after confirmation approval",
+            error: sanitizeError(settleErr, "mandates/confirm beginSettlement"),
           },
           { status: 500 },
         );
@@ -92,12 +90,7 @@ export async function POST(req: NextRequest) {
     });
   } catch (err) {
     return NextResponse.json(
-      {
-        error:
-          err instanceof Error
-            ? err.message
-            : "An unexpected error occurred during confirmation",
-      },
+      { error: sanitizeError(err, "mandates/confirm") },
       { status: 500 },
     );
   }

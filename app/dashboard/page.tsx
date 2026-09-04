@@ -95,6 +95,8 @@ export default function DashboardPage() {
     razorpay_order_id: string | null;
   } | null>(null);
 
+  const [dashboardWarnings, setDashboardWarnings] = useState<string[]>([]);
+
   const fetchData = useCallback(async () => {
     try {
       const res = await fetch("/api/dashboard");
@@ -104,6 +106,7 @@ export default function DashboardPage() {
       setMandates(data.mandates || []);
       setPendingConfirmations(data.pendingConfirmations || []);
       setPaymentAttempts(data.paymentAttempts || []);
+      setDashboardWarnings(data.warnings || []);
       setLastUpdated(new Date());
     } catch (err) {
       console.error("Dashboard fetch error:", err);
@@ -125,6 +128,7 @@ export default function DashboardPage() {
           setMandates(data.mandates || []);
           setPendingConfirmations(data.pendingConfirmations || []);
           setPaymentAttempts(data.paymentAttempts || []);
+          setDashboardWarnings(data.warnings || []);
           setLastUpdated(new Date());
           setLoading(false);
         }
@@ -455,6 +459,17 @@ export default function DashboardPage() {
         </div>
       </header>
 
+      {/* DB Partial-Failure Warning Banner */}
+      {dashboardWarnings.length > 0 && (
+        <div className="my-4 p-3 rounded border border-amber-800 bg-amber-950 text-amber-300 text-xs font-mono flex items-start gap-3 animate-slide-down-fade">
+          <span className="text-amber-500 font-bold tracking-widest shrink-0">⚠ DATA WARNING</span>
+          <ul className="list-disc list-inside space-y-0.5">
+            {dashboardWarnings.map((w, i) => <li key={i}>{w}</li>)}
+          </ul>
+          <button onClick={() => setDashboardWarnings([])} className="ml-auto text-zinc-500 hover:text-white shrink-0">✕</button>
+        </div>
+      )}
+
       {/* Action Notification Toast */}
       {actionMessage && (
         <div
@@ -589,6 +604,26 @@ export default function DashboardPage() {
               );
             })()}
           </div>
+
+          {/* Open-Scope Info Badge — shown when mandate has empty allowlists */}
+          {playgroundMandateId && (() => {
+            const m = mandates.find((x) => x.mandate_id === playgroundMandateId);
+            if (!m) return null;
+            const openMerchant = m.scope_merchant_allowlist.length === 0;
+            const openCategory = m.scope_category_allowlist.length === 0;
+            if (!openMerchant && !openCategory) return null;
+            return (
+              <div className="mx-6 mb-2 px-3 py-2 rounded border border-amber-800 bg-amber-950 text-amber-400 text-[10px] font-mono flex items-start gap-2">
+                <span className="shrink-0 font-bold">⚠ OPEN SCOPE</span>
+                <span>
+                  This mandate has {[openMerchant && "no merchant restriction", openCategory && "no category restriction"].filter(Boolean).join(" and ")}.
+                  {" "}Empty allowlist = <strong>any value permitted</strong> by design.
+                  The <em>Wrong Category</em> scenario requires an explicit allowlist to demonstrate OUT_OF_SCOPE.
+                  Issue a new mandate with a specific category list to enable it.
+                </span>
+              </div>
+            );
+          })()}
 
           {/* Quick Scenarios */}
           {playgroundMandateId && (() => {
