@@ -606,30 +606,63 @@ export default function DashboardPage() {
             const spent = m ? Number(m.daily_spent) : 0;
             const remaining = cap - spent;
 
+            // For "Wrong Category": pick a category that is NOT in the allowlist.
+            // If the mandate allows ANY category (empty allowlist), this scenario
+            // cannot demonstrate OUT_OF_SCOPE — mark it as not applicable.
+            const hasLockedCategories = m && m.scope_category_allowlist.length > 0;
+            const ALL_CATEGORIES = ["GROCERY", "TECH", "ELECTRONICS", "TRAVEL", "UTILITIES", "FOOD", "FASHION", "HEALTH"];
+            const wrongCategory = hasLockedCategories
+              ? ALL_CATEGORIES.find((c) => !m!.scope_category_allowlist.includes(c)) ?? "ELECTRONICS"
+              : null; // null means mandate allows ANY — can't demo OUT_OF_SCOPE
+
+            const hasLockedMerchants = m && m.scope_merchant_allowlist.length > 0;
+            const wrongMerchant = hasLockedMerchants
+              ? "store-electronics"
+              : "store-electronics"; // merchant won't matter if scope is ANY
+
+            // "Needs Approval": pick an amount above threshold but within cap.
+            const needsApprovalAmount = remaining > threshold + 5000
+              ? threshold + 5000
+              : remaining > threshold
+              ? remaining - 1000
+              : null; // null = cap too exhausted to demo this
+
             const scenarios = [
               {
                 label: "✅ Happy Path",
                 desc: "Small in-scope purchase",
                 color: "border-emerald-900 hover:border-emerald-700 text-emerald-400",
+                disabled: remaining <= 0,
+                disabledReason: "Budget exhausted — pick another mandate",
                 params: { merchant_id: allowedMerchant, category: allowedCat, amount: Math.min(30000, Math.max(100, Math.floor(threshold * 0.3))) },
               },
               {
                 label: "🔴 Over Daily Cap",
                 desc: "Exceeds remaining budget",
                 color: "border-rose-900 hover:border-rose-700 text-rose-400",
-                params: { merchant_id: allowedMerchant, category: allowedCat, amount: remaining + 10000 },
+                disabled: false,
+                disabledReason: "",
+                params: { merchant_id: allowedMerchant, category: allowedCat, amount: cap + 10000 },
               },
               {
                 label: "🔴 Wrong Category",
-                desc: "Out-of-scope purchase",
-                color: "border-rose-900 hover:border-rose-700 text-rose-400",
-                params: { merchant_id: "store-electronics", category: "ELECTRONICS", amount: 10000 },
+                desc: wrongCategory ? "Out-of-scope purchase" : "N/A — mandate allows ANY",
+                color: wrongCategory
+                  ? "border-rose-900 hover:border-rose-700 text-rose-400"
+                  : "border-zinc-800 text-zinc-600 cursor-not-allowed opacity-50",
+                disabled: !wrongCategory,
+                disabledReason: "This mandate has no category restriction (ANY). It cannot demonstrate OUT_OF_SCOPE. Pick a mandate with a specific category allowlist.",
+                params: { merchant_id: wrongMerchant, category: wrongCategory ?? "ELECTRONICS", amount: 10000 },
               },
               {
                 label: "🟡 Needs Approval",
-                desc: "Exceeds confirmation threshold",
-                color: "border-amber-900 hover:border-amber-700 text-amber-400",
-                params: { merchant_id: allowedMerchant, category: allowedCat, amount: Math.min(threshold + 10000, remaining > threshold + 10000 ? threshold + 10000 : threshold - 1000) },
+                desc: needsApprovalAmount ? "Exceeds confirmation threshold" : "N/A — budget too low",
+                color: needsApprovalAmount
+                  ? "border-amber-900 hover:border-amber-700 text-amber-400"
+                  : "border-zinc-800 text-zinc-600 cursor-not-allowed opacity-50",
+                disabled: !needsApprovalAmount,
+                disabledReason: "Not enough remaining budget to exceed the threshold. Pick a mandate with more budget left.",
+                params: { merchant_id: allowedMerchant, category: allowedCat, amount: needsApprovalAmount ?? threshold + 1000 },
               },
             ];
 
@@ -642,27 +675,34 @@ export default function DashboardPage() {
                   {scenarios.map((s) => (
                     <button
                       key={s.label}
-                      disabled={playgroundFiring}
+                      disabled={playgroundFiring || s.disabled}
+                      title={s.disabled ? s.disabledReason : ""}
                       onClick={() => {
                         const merchant = s.params.merchant_id;
                         const cat = s.params.category;
                         const amt = s.params.amount;
-                        // pre-fill the custom inputs so the user sees what was sent
                         setPlaygroundMerchant(merchant);
                         setPlaygroundCategory(cat);
                         setPlaygroundAmount((amt / 100).toFixed(2));
                         void handlePlaygroundFire({ merchant_id: merchant, category: cat, amount: amt });
                       }}
-                      className={`flex flex-col gap-1 px-4 py-3 rounded border bg-[var(--color-page)] text-left transition-all disabled:opacity-40 disabled:cursor-not-allowed ${s.color}`}
+                      className={`flex flex-col gap-1 px-4 py-3 rounded border bg-[var(--color-page)] text-left transition-all ${s.disabled ? "opacity-40 cursor-not-allowed" : ""} ${!s.disabled ? s.color : "border-zinc-800 text-zinc-600"}`}
                     >
                       <span className="text-xs font-bold font-mono">{s.label}</span>
                       <span className="text-[10px] text-zinc-500">{s.desc}</span>
-                      <span className="text-[9px] font-mono text-zinc-600 mt-1">
-                        ₹{(s.params.amount / 100).toFixed(0)} · {s.params.category}
-                      </span>
+                      {!s.disabled && (
+                        <span className="text-[9px] font-mono text-zinc-600 mt-1">
+                          ₹{(s.params.amount / 100).toFixed(0)} · {s.params.category}
+                        </span>
+                      )}
                     </button>
                   ))}
                 </div>
+                {remaining <= 0 && (
+                  <p className="text-[10px] font-mono text-amber-600 mt-3">
+                    ⚠ This mandate&apos;s daily budget is fully spent. Happy Path and Needs Approval are disabled. Switch to a mandate with remaining budget to demo approvals.
+                  </p>
+                )}
               </div>
             );
           })()}
@@ -686,13 +726,22 @@ export default function DashboardPage() {
                 </div>
                 <div>
                   <label className="block text-[9px] font-mono uppercase tracking-widest text-zinc-600 mb-1">Category</label>
-                  <input
-                    type="text"
+                  <select
                     value={playgroundCategory}
                     onChange={(e) => setPlaygroundCategory(e.target.value)}
-                    placeholder="GROCERY"
-                    className="w-full bg-[var(--color-page)] border border-[var(--color-elevated)] text-zinc-200 font-mono text-xs rounded px-3 py-2 focus:outline-none focus:border-zinc-600 placeholder-zinc-700"
-                  />
+                    className="w-full bg-[var(--color-page)] border border-[var(--color-elevated)] text-zinc-200 font-mono text-xs rounded px-3 py-2 focus:outline-none focus:border-zinc-600"
+                  >
+                    <option value="">— select —</option>
+                    <option value="GROCERY">GROCERY</option>
+                    <option value="FOOD">FOOD</option>
+                    <option value="TECH">TECH</option>
+                    <option value="ELECTRONICS">ELECTRONICS</option>
+                    <option value="TRAVEL">TRAVEL</option>
+                    <option value="UTILITIES">UTILITIES</option>
+                    <option value="FASHION">FASHION</option>
+                    <option value="HEALTH">HEALTH</option>
+                    <option value="SAAS">SAAS</option>
+                  </select>
                 </div>
                 <div>
                   <label className="block text-[9px] font-mono uppercase tracking-widest text-zinc-600 mb-1">Amount (₹)</label>
