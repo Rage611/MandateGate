@@ -5,17 +5,12 @@ import type { PaymentRequest } from "@/lib/gate/types";
 
 export const dynamic = "force-dynamic";
 
-interface ConfirmRequestBody {
-  mandate_id?: string;
-  request_id?: string;
-  amount?: number;
-  merchant_id?: string;
-  category?: string;
-}
-
 export async function POST(req: NextRequest) {
   try {
-    const body: ConfirmRequestBody = await req.json().catch(() => ({}));
+    const body = await req.json().catch(() => ({})) as {
+      mandate_id?: string;
+      request_id?: string;
+    };
     const { mandate_id, request_id } = body;
 
     if (!mandate_id || !request_id) {
@@ -33,50 +28,38 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    let request: PaymentRequest;
+    // SECURITY: Always fetch request details from the authoritative pending_confirmation
+    // audit log entry. We never trust the caller's supplied amount, merchant_id, or
+    // category — that would allow substituting different payment details at confirmation
+    // time (Codex finding #31). The source of truth is what was evaluated by the gate
+    // when it produced the pending_confirmation decision.
+    const { data: auditRow, error: auditError } = await db
+      .from("audit_log")
+      .select("amount, merchant_id, category")
+      .eq("mandate_id", mandate_id)
+      .eq("request_id", request_id)
+      .eq("decision", "pending_confirmation")
+      .order("id", { ascending: false })
+      .limit(1)
+      .maybeSingle();
 
-    if (
-      body.amount !== undefined &&
-      body.merchant_id !== undefined &&
-      body.category !== undefined
-    ) {
-      request = {
-        mandate_id,
-        request_id,
-        amount: Number(body.amount),
-        merchant_id: String(body.merchant_id),
-        category: String(body.category),
-      };
-    } else {
-      // Look up original request details from the pending_confirmation audit log entry
-      const { data: auditRow, error: auditError } = await db
-        .from("audit_log")
-        .select("amount, merchant_id, category")
-        .eq("mandate_id", mandate_id)
-        .eq("request_id", request_id)
-        .eq("decision", "pending_confirmation")
-        .order("id", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (auditError || !auditRow) {
-        return NextResponse.json(
-          {
-            error:
-              "Pending confirmation record not found in audit log. Please supply amount, merchant_id, and category.",
-          },
-          { status: 404 },
-        );
-      }
-
-      request = {
-        mandate_id,
-        request_id,
-        amount: Number(auditRow.amount),
-        merchant_id: auditRow.merchant_id,
-        category: auditRow.category,
-      };
+    if (auditError || !auditRow) {
+      return NextResponse.json(
+        {
+          error:
+            "No pending confirmation found for this mandate_id / request_id. It may have already been confirmed, rejected, or never held.",
+        },
+        { status: 404 },
+      );
     }
+
+    const request: PaymentRequest = {
+      mandate_id,
+      request_id,
+      amount: Number(auditRow.amount),
+      merchant_id: auditRow.merchant_id,
+      category: auditRow.category,
+    };
 
     // Call the core policy confirmation engine
     const decision = await confirmPendingPayment(request, db);

@@ -1,4 +1,4 @@
-﻿import { type NextRequest, NextResponse } from "next/server";
+import { type NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "crypto";
 import { evaluateGateDecision } from "@/lib/gate/evaluate";
 import { beginSettlement } from "@/lib/gate/settle";
@@ -22,7 +22,8 @@ export const dynamic = "force-dynamic";
  */
 
 const EXPLANATIONS: Record<string, string> = {
-  approved: "Payment approved and settlement initiated with Razorpay.",
+  approved:
+    "Gate approved. Razorpay order created — payment is pending capture (settlement completes when Razorpay confirms the charge via webhook).",
   pending_confirmation:
     "Amount exceeds the mandate confirmation threshold — held for human approval. Check the Pending Confirmations panel above.",
   MANDATE_NOT_FOUND:
@@ -38,9 +39,11 @@ const EXPLANATIONS: Record<string, string> = {
   DUPLICATE_REQUEST:
     "This request_id was already processed under this mandate. Duplicate payments are blocked to prevent double-spending.",
   OUT_OF_SCOPE:
-    "The merchant or category is not in this mandate allowlist. The agent tried to buy outside its authorised scope.",
+    "The merchant or category is not in this mandate's allowlist. The agent tried to buy outside its authorised scope.",
   CAP_EXCEEDED:
-    "This transaction would push the daily spending past the mandate hard cap. The agent daily budget is exhausted.",
+    "This transaction would push the daily spending past the mandate hard cap. The agent's daily budget is exhausted.",
+  EXCEEDS_PER_TXN_LIMIT:
+    "The transaction amount exceeds the mandate's per-transaction limit. Even with daily budget remaining, individual transactions are capped.",
   NEEDS_CONFIRMATION:
     "Amount exceeds the confirmation threshold — held for human review.",
 };
@@ -116,6 +119,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   let razorpayOrderId: string | null = null;
+
   if (decision.outcome === "approved") {
     try {
       const settlement = await beginSettlement(
@@ -124,8 +128,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
       razorpayOrderId = settlement.razorpayOrderId;
     } catch (err) {
+      // Settlement failed after gate approval. The gate has already reserved budget
+      // (beginSettlement releases it internally via release_spend on order failure),
+      // so we must NOT silently return "approved" — the agent has no valid order to pay.
       const message = err instanceof Error ? err.message : String(err);
       console.error("[gate/pay] beginSettlement threw:", message);
+      return NextResponse.json(
+        {
+          decision: "approved",
+          reason_code: null,
+          explanation:
+            "Gate approved but Razorpay order creation failed. Budget has been released. Please retry.",
+          mandate_id,
+          request_id,
+          amount,
+          amount_inr: amount / 100,
+          razorpay_order_id: null,
+          settlement_error: "Order creation failed — no payment was charged.",
+        },
+        { status: 502 },
+      );
     }
   }
 

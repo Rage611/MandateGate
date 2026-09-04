@@ -417,12 +417,19 @@ export async function confirmPendingPayment(
 
   // ── e: Idempotency check ──────────────────────────────────────────────────
   // Guard against double-confirmation of the same request_id.
-  const { data: existing } = await db
+  // FAIL CLOSED: DB error → throw, don't silently allow a potential double-spend.
+  const { data: existing, error: idempotencyLookupError } = await db
     .from("consumed_requests")
     .select("request_id")
     .eq("mandate_id", mandate_id)
     .eq("request_id", request_id)
     .maybeSingle();
+
+  if (idempotencyLookupError) {
+    throw new Error(
+      `Idempotency check failed — cannot safely confirm: ${idempotencyLookupError.message}`,
+    );
+  }
 
   if (existing) {
     return reject(REASON_CODES.DUPLICATE_REQUEST);
@@ -432,12 +439,21 @@ export async function confirmPendingPayment(
   const merchantAllowed =
     mandate.scope.merchant_allowlist.length === 0 ||
     mandate.scope.merchant_allowlist.includes(merchant_id);
+  // Normalize category to uppercase for consistent matching (mirrors evaluate.ts).
+  const normalizedCategory = category.toUpperCase();
   const categoryAllowed =
     mandate.scope.category_allowlist.length === 0 ||
-    mandate.scope.category_allowlist.includes(category);
+    mandate.scope.category_allowlist.includes(normalizedCategory);
 
   if (!merchantAllowed || !categoryAllowed) {
     return reject(REASON_CODES.OUT_OF_SCOPE);
+  }
+
+  // ── f.5: Per-transaction limit check ─────────────────────────────────────
+  // max_per_txn applies at confirmation time too — the human cannot approve
+  // an amount the mandate policy never permitted per transaction.
+  if (amount > mandate.limits.max_per_txn) {
+    return reject(REASON_CODES.EXCEEDS_PER_TXN_LIMIT);
   }
 
   // ── [SKIP g: confirmation_threshold] — this IS the confirmation ───────────
@@ -460,22 +476,34 @@ export async function confirmPendingPayment(
   }
 
   // ── i: Insert into consumed_requests ─────────────────────────────────────
-  const { error: idempotencyError } = await db
+  // IMPORTANT: attempt_spend reserved the budget. If this insert fails, we MUST
+  // release the spend so the budget is not permanently consumed.
+  const { error: consumedInsertError } = await db
     .from("consumed_requests")
     .insert({ mandate_id, request_id });
 
-  if (idempotencyError) {
+  if (consumedInsertError) {
+    // Release the reserved spend before throwing — budget must not leak.
+    await db.rpc("release_spend", { p_mandate_id: mandate_id, p_amount: amount });
     throw new Error(
-      `consumed_requests insert failed: ${idempotencyError.message}`,
+      `consumed_requests insert failed (spend released): ${consumedInsertError.message}`,
     );
   }
 
   // ── j: Write approved audit row ───────────────────────────────────────────
-  await writeAudit(db, {
-    ...auditBase,
-    decision: "approved",
-    reason_code: null,
-  });
+  try {
+    await writeAudit(db, {
+      ...auditBase,
+      decision: "approved",
+      reason_code: null,
+    });
+  } catch (auditErr) {
+    // Audit write failed but spend + idempotency are committed — don't release.
+    console.error(
+      `[confirm] AUDIT WRITE FAILED for confirmed request ${request_id} on mandate ${mandate_id}:`,
+      auditErr,
+    );
+  }
 
   return { outcome: "approved", mandate_id, request_id };
 }

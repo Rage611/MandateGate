@@ -2,6 +2,11 @@
  * app/api/mandates/confirm/__tests__/confirm-route.test.ts — Phase 5
  *
  * Tests for the POST /api/mandates/confirm route handler.
+ *
+ * Updated after security fix: the route now ALWAYS looks up request details
+ * from the audit_log (finding #31 — confirmation payload substitution).
+ * Tests that previously supplied amount/merchant/category in the body now
+ * seed the mock audit_log lookup instead.
  */
 
 import { describe, it, expect, beforeEach, vi, type Mock } from "vitest";
@@ -45,6 +50,14 @@ function makeRequest(body: Record<string, unknown>): NextRequest {
   });
 }
 
+/** Seed the mock DB to return a pending_confirmation audit row. */
+function seedAuditRow(amount: string, merchant_id: string, category: string) {
+  mockMaybeSingle.mockResolvedValueOnce({
+    data: { amount, merchant_id, category },
+    error: null,
+  });
+}
+
 describe("POST /api/mandates/confirm", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -66,7 +79,10 @@ describe("POST /api/mandates/confirm", () => {
     expect(data.error).toContain("mandate_id and request_id are required");
   });
 
-  it("approves and initiates settlement when full payload is provided", async () => {
+  it("approves and initiates settlement — always reads from audit_log", async () => {
+    // Seed audit log lookup (route no longer trusts body amount/merchant/category)
+    seedAuditRow("120000", "grocery", "FOOD");
+
     mockConfirmPendingPayment.mockResolvedValueOnce({
       outcome: "approved",
       mandate_id: "mandate-1",
@@ -79,9 +95,10 @@ describe("POST /api/mandates/confirm", () => {
     const req = makeRequest({
       mandate_id: "mandate-1",
       request_id: "req-1",
-      amount: 120_000,
-      merchant_id: "grocery",
-      category: "FOOD",
+      // Even if caller supplies these, they are ignored — route always uses audit log
+      amount: 999_999,
+      merchant_id: "attacker",
+      category: "FRAUD",
     });
 
     const res = await POST(req);
@@ -92,20 +109,21 @@ describe("POST /api/mandates/confirm", () => {
     expect(data.decision.outcome).toBe("approved");
     expect(data.razorpayOrderId).toBe("order_rzp123");
 
+    // Confirm was called with audit-log values, NOT body values
     expect(mockConfirmPendingPayment).toHaveBeenCalledWith(
       {
         mandate_id: "mandate-1",
         request_id: "req-1",
-        amount: 120_000,
-        merchant_id: "grocery",
-        category: "FOOD",
+        amount: 120_000,        // from audit log, not body
+        merchant_id: "grocery", // from audit log, not body
+        category: "FOOD",       // from audit log, not body
       },
       mockDb,
     );
     expect(mockBeginSettlement).toHaveBeenCalledTimes(1);
   });
 
-  it("looks up request details from audit_log if omitted from payload", async () => {
+  it("looks up request details from audit_log", async () => {
     mockMaybeSingle.mockResolvedValueOnce({
       data: {
         amount: "150000",
@@ -147,7 +165,7 @@ describe("POST /api/mandates/confirm", () => {
     );
   });
 
-  it("returns 404 when audit_log lookup fails for omitted details", async () => {
+  it("returns 404 when audit_log has no pending_confirmation entry", async () => {
     mockMaybeSingle.mockResolvedValueOnce({
       data: null,
       error: null,
@@ -161,11 +179,14 @@ describe("POST /api/mandates/confirm", () => {
     const res = await POST(req);
     expect(res.status).toBe(404);
     const data = await res.json();
-    expect(data.error).toContain("Pending confirmation record not found");
+    expect(data.error).toContain("No pending confirmation found");
     expect(mockConfirmPendingPayment).not.toHaveBeenCalled();
   });
 
   it("propagates rejection from confirmPendingPayment without calling beginSettlement", async () => {
+    // Seed audit log with valid data so the lookup succeeds
+    seedAuditRow("200000", "grocery", "FOOD");
+
     mockConfirmPendingPayment.mockResolvedValueOnce({
       outcome: "rejected",
       reason_code: "CAP_EXCEEDED",
@@ -176,9 +197,6 @@ describe("POST /api/mandates/confirm", () => {
     const req = makeRequest({
       mandate_id: "mandate-1",
       request_id: "req-1",
-      amount: 200_000,
-      merchant_id: "grocery",
-      category: "FOOD",
     });
 
     const res = await POST(req);

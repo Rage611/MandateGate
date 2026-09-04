@@ -36,6 +36,12 @@ export const REASON_CODES = {
   /** The transaction would exceed the mandate's daily_cap. */
   CAP_EXCEEDED: "CAP_EXCEEDED",
   /**
+   * The transaction amount exceeds the mandate's per-transaction limit.
+   * Checked before the daily cap — hard constraint that applies regardless
+   * of remaining daily budget.
+   */
+  EXCEEDS_PER_TXN_LIMIT: "EXCEEDS_PER_TXN_LIMIT",
+  /**
    * The amount exceeds the mandate's confirmation_threshold.
    * Approval is deferred until a human principal explicitly confirms.
    * This is NOT a rejection — the outcome is "pending_confirmation".
@@ -137,6 +143,8 @@ export interface MandateRow {
   status: string;
   signature: string;
   daily_spent: number;
+  /** Added by migration 0004. Optional so older test fixtures without this column still compile. */
+  last_daily_reset?: string;
 }
 
 /**

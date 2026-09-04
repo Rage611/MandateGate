@@ -1,4 +1,4 @@
-﻿import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { issueMandate } from "@/lib/mandate/sign";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import type { MandateInput } from "@/lib/mandate/types";
@@ -94,6 +94,51 @@ export async function POST(req: NextRequest) {
       },
       confirmation_threshold: Number(input.confirmation_threshold),
     };
+
+    // ── Semantic safety validation ─────────────────────────────────────────
+    // Schema completeness checks above only validate type/presence. These checks
+    // guard against semantically invalid mandates that could corrupt accounting
+    // or bypass policy (Codex finding #41).
+    const safetyErrors: string[] = [];
+
+    if (!isFinite(mandateInput.limits.max_per_txn) || mandateInput.limits.max_per_txn <= 0) {
+      safetyErrors.push("limits.max_per_txn must be a positive finite number (paise)");
+    }
+    if (!isFinite(mandateInput.limits.daily_cap) || mandateInput.limits.daily_cap <= 0) {
+      safetyErrors.push("limits.daily_cap must be a positive finite number (paise)");
+    }
+    if (mandateInput.limits.max_per_txn > mandateInput.limits.daily_cap) {
+      safetyErrors.push(
+        "limits.max_per_txn cannot exceed limits.daily_cap — a single transaction cannot cost more than the entire daily budget",
+      );
+    }
+    if (!isFinite(mandateInput.confirmation_threshold) || mandateInput.confirmation_threshold < 0) {
+      safetyErrors.push("confirmation_threshold must be a non-negative finite number (paise)");
+    }
+    if (mandateInput.confirmation_threshold > mandateInput.limits.daily_cap) {
+      safetyErrors.push(
+        "confirmation_threshold cannot exceed daily_cap — every transaction would be permanently unconfirmable",
+      );
+    }
+
+    const notBefore = new Date(mandateInput.validity.not_before);
+    const notAfter = new Date(mandateInput.validity.not_after);
+    if (isNaN(notBefore.getTime())) {
+      safetyErrors.push("validity.not_before is not a valid ISO 8601 date");
+    }
+    if (isNaN(notAfter.getTime())) {
+      safetyErrors.push("validity.not_after is not a valid ISO 8601 date");
+    }
+    if (!isNaN(notBefore.getTime()) && !isNaN(notAfter.getTime()) && notAfter <= notBefore) {
+      safetyErrors.push("validity.not_after must be strictly after validity.not_before");
+    }
+
+    if (safetyErrors.length > 0) {
+      return NextResponse.json(
+        { error: `Mandate failed safety validation: ${safetyErrors.join("; ")}` },
+        { status: 400 },
+      );
+    }
 
     const privateKey = process.env.MANDATE_SIGNING_PRIVATE_KEY;
     if (!privateKey) {

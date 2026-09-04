@@ -120,7 +120,11 @@ export async function evaluateGateDecision(
   // Capture non-null reference for closures and downstream async calls.
   const safeDb: SupabaseClient = db;
 
-  const { mandate_id, request_id, amount, merchant_id, category } = request;
+  const { mandate_id, request_id, amount } = request;
+  // Normalize category to UPPERCASE for consistent scope matching regardless
+  // of how the caller cased it (playground sends upper, scripts may not).
+  const merchant_id = request.merchant_id;
+  const category = request.category.toUpperCase();
 
   // Shared audit base — all branches add decision/reason_code on top.
   const auditBase = { mandate_id, request_id, amount, merchant_id, category };
@@ -187,15 +191,59 @@ export async function evaluateGateDecision(
     return reject(REASON_CODES.MANDATE_EXPIRED);
   }
 
+  // ── Step d.5: Daily spend reset (lazy, per-request, atomic) ─────────────
+  // Calls the reset_daily_if_needed SQL function, which atomically resets
+  // daily_spent → 0 and last_daily_reset → today (UTC) only when the stored
+  // last_daily_reset is before today. Returns 1 row if a reset happened, 0 if
+  // not needed. Either outcome is fine — we just re-fetch daily_spent from
+  // the row below which was already fetched in step a.
+  //
+  // If the RPC errors we log and continue — a failed reset is safer than
+  // blocking the payment. The cap check below uses the pre-fetched row.daily_spent
+  // which may be stale-high (conservative: rejects more than necessary), never
+  // stale-low (never allows more than the cap).
+  const todayUtc = new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
+  const { error: resetError } = await safeDb.rpc("reset_daily_if_needed", {
+    p_mandate_id: mandate_id,
+    p_today_date: todayUtc,
+  });
+  if (resetError) {
+    console.error(
+      `[evaluate] reset_daily_if_needed failed for mandate ${mandate_id}:`,
+      resetError.message,
+    );
+  } else {
+    // If a reset happened, re-fetch daily_spent so the cap pre-check uses
+    // the fresh 0 value, not the stale accumulated total.
+    const { data: freshRow } = await safeDb
+      .from("mandates")
+      .select("daily_spent")
+      .eq("mandate_id", mandate_id)
+      .single();
+    if (freshRow) {
+      row.daily_spent = freshRow.daily_spent;
+    }
+  }
+
   // ── Step e: Idempotency check ─────────────────────────────────────────────
   // Must happen BEFORE scope/cap checks so a retried request can't be charged
   // twice even if it was previously rejected for a different reason.
-  const { data: existing } = await safeDb
+  //
+  // FAIL CLOSED: if the DB cannot answer whether this request was already
+  // consumed, we must NOT proceed — the risk of double-spending is worse
+  // than a temporary rejection. Throw so the caller surfaces a 500.
+  const { data: existing, error: idempotencyLookupError } = await safeDb
     .from("consumed_requests")
     .select("request_id")
     .eq("mandate_id", mandate_id)
     .eq("request_id", request_id)
     .maybeSingle();
+
+  if (idempotencyLookupError) {
+    throw new Error(
+      `Idempotency check failed — cannot safely proceed: ${idempotencyLookupError.message}`,
+    );
+  }
 
   if (existing) {
     return reject(REASON_CODES.DUPLICATE_REQUEST);
@@ -211,6 +259,16 @@ export async function evaluateGateDecision(
 
   if (!merchantAllowed || !categoryAllowed) {
     return reject(REASON_CODES.OUT_OF_SCOPE);
+  }
+
+  // ── Step f.5: Per-transaction limit check ────────────────────────────────
+  // The mandate's max_per_txn is a hard ceiling on any single transaction,
+  // independent of the daily cap. A mandate with daily_cap=₹5,000 and
+  // max_per_txn=₹500 should never approve a single ₹1,000 request, even
+  // if there is enough daily budget. This was previously signed but never
+  // enforced — Codex finding #1.
+  if (amount > mandate.limits.max_per_txn) {
+    return reject(REASON_CODES.EXCEEDS_PER_TXN_LIMIT);
   }
 
   // ── Step g: Hard cap pre-check (non-atomic, UX optimisation) ────────────
@@ -301,21 +359,37 @@ export async function evaluateGateDecision(
   }
 
   // ── Step j: Record approval ───────────────────────────────────────────────
-  const { error: idempotencyError } = await safeDb
+  // IMPORTANT: attempt_spend has already reserved the budget. If either of the
+  // following writes fails, we MUST release the spend to avoid permanently
+  // consuming budget without a matching idempotency or audit record.
+  const { error: consumedInsertError } = await safeDb
     .from("consumed_requests")
     .insert({ mandate_id, request_id });
 
-  if (idempotencyError) {
+  if (consumedInsertError) {
+    // Release the reserved spend before throwing — budget must not leak.
+    await safeDb.rpc("release_spend", { p_mandate_id: mandate_id, p_amount: amount });
     throw new Error(
-      `consumed_requests insert failed: ${idempotencyError.message}`,
+      `consumed_requests insert failed (spend released): ${consumedInsertError.message}`,
     );
   }
 
-  await writeAudit(safeDb, {
-    ...auditBase,
-    decision: "approved",
-    reason_code: null,
-  });
+  try {
+    await writeAudit(safeDb, {
+      ...auditBase,
+      decision: "approved",
+      reason_code: null,
+    });
+  } catch (auditErr) {
+    // Audit write failed. The spend is committed and idempotency record exists,
+    // so we do NOT release. The payment is valid — we just lost the audit row.
+    // Log at error level so ops can investigate.
+    console.error(
+      `[evaluate] AUDIT WRITE FAILED for approved request ${request_id} on mandate ${mandate_id}:`,
+      auditErr,
+    );
+    // Do not rethrow — the gate decision is still valid.
+  }
 
   return { outcome: "approved", mandate_id, request_id };
 }

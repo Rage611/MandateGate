@@ -41,7 +41,10 @@ function makeInput(overrides: Partial<MandateInput> = {}): MandateInput {
       category_allowlist: ["TRAVEL"],
     },
     limits: {
-      max_per_txn: 100_000, // ₹1,000
+      // High enough that existing cap/threshold scenario tests are not
+      // accidentally caught by the per-txn check. Dedicated EXCEEDS_PER_TXN_LIMIT
+      // tests use override({ limits: { max_per_txn: <low value> } }).
+      max_per_txn: 1_000_000, // ₹10,000 — well above test amounts (₹3k, ₹6k)
       daily_cap: 500_000, // ₹5,000
       currency: "INR",
     },
@@ -917,6 +920,23 @@ describe("all 8 reason codes are reachable", () => {
     );
     reached.add(r8.reason_code!);
 
+    // EXCEEDS_PER_TXN_LIMIT — needs a fresh mandate with a low max_per_txn
+    // so the signature matches. Mutating the row's limits_max_per_txn would
+    // break signature verification.
+    const lowTxnInput = makeInput({
+      limits: { max_per_txn: 5_000, daily_cap: 500_000, currency: "INR" },
+    });
+    const lowTxnMandate = issueMandate(lowTxnInput, privateKey);
+    state.mandateRow = mandateToRow(lowTxnMandate);
+    state.auditLog = [];
+    state.consumedRequests = new Set();
+    state.dailySpent = 0;
+    const r9 = await evaluateGateDecision(
+      makeRequest(lowTxnMandate.mandate_id, { amount: 10_000 }),
+      client,
+    );
+    reached.add(r9.reason_code!);
+
     expect(reached).toContain(REASON_CODES.MANDATE_NOT_FOUND);
     expect(reached).toContain(REASON_CODES.INVALID_SIGNATURE);
     expect(reached).toContain(REASON_CODES.MANDATE_REVOKED);
@@ -926,6 +946,81 @@ describe("all 8 reason codes are reachable", () => {
     expect(reached).toContain(REASON_CODES.OUT_OF_SCOPE);
     expect(reached).toContain(REASON_CODES.CAP_EXCEEDED);
     expect(reached).toContain(REASON_CODES.NEEDS_CONFIRMATION);
-    expect(reached.size).toBe(9);
+    expect(reached).toContain(REASON_CODES.EXCEEDS_PER_TXN_LIMIT);
+    expect(reached.size).toBe(10);
+  });
+});
+
+// ── Per-transaction limit enforcement ────────────────────────────────────────
+
+describe("per-transaction limit: EXCEEDS_PER_TXN_LIMIT", () => {
+  it("rejects when amount exceeds max_per_txn even if daily cap has room", async () => {
+    const input = makeInput({ limits: { max_per_txn: 50_000, daily_cap: 500_000, currency: "INR" } });
+    const mandate = issueMandate(input, privateKey);
+    const state: MockState = {
+      mandateRow: mandateToRow(mandate),
+      consumedRequests: new Set(),
+      auditLog: [],
+      dailySpent: 0,
+    };
+    const client = buildMockClient(state);
+
+    // 60_000 > max_per_txn (50_000), well within daily_cap
+    const decision = await evaluateGateDecision(
+      makeRequest(mandate.mandate_id, { amount: 60_000 }),
+      client,
+    );
+
+    expect(decision.outcome).toBe("rejected");
+    expect(decision.reason_code).toBe(REASON_CODES.EXCEEDS_PER_TXN_LIMIT);
+    expect(state.auditLog).toHaveLength(1);
+    expect(state.auditLog[0]).toMatchObject({
+      decision: "rejected",
+      reason_code: REASON_CODES.EXCEEDS_PER_TXN_LIMIT,
+    });
+    // No budget consumed — check happened before attempt_spend
+    expect(state.dailySpent).toBe(0);
+  });
+
+  it("approves when amount is exactly max_per_txn", async () => {
+    const input = makeInput({ limits: { max_per_txn: 50_000, daily_cap: 500_000, currency: "INR" } });
+    const mandate = issueMandate(input, privateKey);
+    const state: MockState = {
+      mandateRow: mandateToRow(mandate),
+      consumedRequests: new Set(),
+      auditLog: [],
+      dailySpent: 0,
+    };
+    const client = buildMockClient(state);
+
+    const decision = await evaluateGateDecision(
+      makeRequest(mandate.mandate_id, { amount: 50_000 }),
+      client,
+    );
+
+    expect(decision.outcome).toBe("approved");
+    expect(state.dailySpent).toBe(50_000);
+  });
+
+  it("rejects per-txn BEFORE checking daily cap — no budget consumed", async () => {
+    const input = makeInput({ limits: { max_per_txn: 10_000, daily_cap: 500_000, currency: "INR" } });
+    const mandate = issueMandate(input, privateKey);
+    const state: MockState = {
+      mandateRow: mandateToRow(mandate),
+      consumedRequests: new Set(),
+      auditLog: [],
+      dailySpent: 0,
+    };
+    const client = buildMockClient(state);
+
+    const decision = await evaluateGateDecision(
+      makeRequest(mandate.mandate_id, { amount: 20_000 }),
+      client,
+    );
+
+    expect(decision.outcome).toBe("rejected");
+    expect(decision.reason_code).toBe(REASON_CODES.EXCEEDS_PER_TXN_LIMIT);
+    // attempt_spend was never called — daily_spent stays at 0
+    expect(state.dailySpent).toBe(0);
   });
 });

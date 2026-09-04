@@ -179,7 +179,7 @@ export default function DashboardPage() {
       } else {
         setActionMessage({
           type: "success",
-          text: `Payment confirmed & settled successfully! Razorpay Order: ${result.razorpayOrderId ?? "N/A"}`,
+          text: `Confirmed. Razorpay order created — awaiting payment capture. Order: ${result.razorpayOrderId ?? "N/A"}`,
         });
       }
 
@@ -664,6 +664,16 @@ export default function DashboardPage() {
                 disabledReason: "Not enough remaining budget to exceed the threshold. Pick a mandate with more budget left.",
                 params: { merchant_id: allowedMerchant, category: allowedCat, amount: needsApprovalAmount ?? threshold + 1000 },
               },
+              {
+                // Demonstrate the newly-enforced per-transaction limit.
+                // Fires an amount 10% above max_per_txn so it always fails this check.
+                label: "🔴 Exceeds Per-Txn",
+                desc: "Over single-transaction limit",
+                color: "border-rose-900 hover:border-rose-700 text-rose-400",
+                disabled: false,
+                disabledReason: "",
+                params: { merchant_id: allowedMerchant, category: allowedCat, amount: Math.floor(m ? Number(m.limits_max_per_txn) * 1.1 + 1000 : 200000) },
+              },
             ];
 
             return (
@@ -671,7 +681,7 @@ export default function DashboardPage() {
                 <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-500 mb-3">
                   Quick Scenarios — 1 Click
                 </div>
-                <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
                   {scenarios.map((s) => (
                     <button
                       key={s.label}
