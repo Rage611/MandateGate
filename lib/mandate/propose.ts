@@ -137,7 +137,6 @@ function buildSystemPrompt(): string {
   const now = new Date();
   const nowIso = now.toISOString();
   const in48h = new Date(now.getTime() + 48 * 60 * 60 * 1000).toISOString();
-  const in30d = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
 
   return `You are a mandate authorization assistant for MandateGate, a high-assurance payment control system.
 
@@ -155,7 +154,7 @@ WHEN TO CALL propose_mandate:
 WHEN TO CALL refuse_mandate — YOU MUST REFUSE if:
 1. No cap or "unlimited" / "whatever needed" / "no limit" — REFUSE
 2. Scope is "any merchant" / "anywhere" / "anything" / effectively unrestricted — REFUSE
-3. Validity longer than 30 days (${in30d}) without explicit user justification — REFUSE
+3. Validity DURATION is strictly more than 30 calendar days (e.g. "valid for 3 months", "valid for 60 days", "valid forever") — REFUSE. Durations of 30 days or less (e.g. "7 days", "2 weeks", "1 month") are ALLOWED.
 4. Request so vague that a responsible cap or category cannot be inferred — REFUSE
 
 CONSERVATIVE INTERPRETATION (when ambiguous but not unsafe):
