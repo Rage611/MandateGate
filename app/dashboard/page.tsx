@@ -655,12 +655,23 @@ export default function DashboardPage() {
               ? "store-electronics"
               : "store-electronics"; // merchant won't matter if scope is ANY
 
-            // "Needs Approval": pick an amount above threshold but within cap.
-            const needsApprovalAmount = remaining > threshold + 5000
-              ? threshold + 5000
-              : remaining > threshold
-              ? remaining - 1000
-              : null; // null = cap too exhausted to demo this
+            const maxPerTxn = m ? Number(m.limits_max_per_txn) : 100000;
+
+            // "Needs Approval": pick an amount that is:
+            //   (a) strictly above confirmation_threshold, AND
+            //   (b) at or below max_per_txn (otherwise EXCEEDS_PER_TXN_LIMIT fires first).
+            // If threshold >= max_per_txn, the threshold is unreachable by any single
+            // transaction — every valid payment is auto-approved. Disable the scenario.
+            const thresholdReachable = threshold < maxPerTxn;
+            const needsApprovalAmount = thresholdReachable && remaining > threshold + 5000
+              ? Math.min(threshold + 5000, maxPerTxn)  // just above threshold, within per-txn cap
+              : thresholdReachable && remaining > threshold
+              ? Math.min(remaining - 1000, maxPerTxn)
+              : null; // null = impossible or budget too low
+
+            const needsApprovalDisabledReason = !thresholdReachable
+              ? `This mandate's confirmation threshold (₹${(threshold / 100).toFixed(0)}) is higher than its per-transaction limit (₹${(maxPerTxn / 100).toFixed(0)}). No single transaction can ever reach the threshold — all payments are auto-approved. To demo this, issue a mandate where the threshold is below the per-txn limit.`
+              : "Not enough remaining budget to exceed the threshold. Pick a mandate with more budget left.";
 
             const scenarios = [
               {
@@ -691,12 +702,12 @@ export default function DashboardPage() {
               },
               {
                 label: "🟡 Needs Approval",
-                desc: needsApprovalAmount ? "Exceeds confirmation threshold" : "N/A — budget too low",
+                desc: needsApprovalAmount ? "Exceeds confirmation threshold" : "N/A — see reason",
                 color: needsApprovalAmount
                   ? "border-amber-900 hover:border-amber-700 text-amber-400"
                   : "border-zinc-800 text-zinc-600 cursor-not-allowed opacity-50",
                 disabled: !needsApprovalAmount,
-                disabledReason: "Not enough remaining budget to exceed the threshold. Pick a mandate with more budget left.",
+                disabledReason: needsApprovalDisabledReason,
                 params: { merchant_id: allowedMerchant, category: allowedCat, amount: needsApprovalAmount ?? threshold + 1000 },
               },
               {
